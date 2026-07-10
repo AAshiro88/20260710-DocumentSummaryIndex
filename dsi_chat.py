@@ -63,6 +63,27 @@ if RERANK_ENABLE:
 
 
 # ============================================================
+# State Machine - 對話狀態常數
+# ============================================================
+S_IDLE = "idle"
+S_WAIT_CONFIRM = "wait_confirm"
+S_WAIT_REPHRASE = "wait_rephrase"
+S_SELECTING = "selecting"
+S_WAIT_QUESTION = "wait_question"
+
+CONFIRM_WORDS = {"是", "對", "yes", "對的", "是的", "正確", "沒錯", "要", "好"}
+REJECT_WORDS = {"不對", "不是", "否", "no", "錯誤", "不正確", "不是這個", "重新", "換"}
+
+def _is_confirm(text):
+    t = text.strip().lower()
+    return t in {w.lower() for w in CONFIRM_WORDS}
+
+def _is_reject(text):
+    t = text.strip().lower()
+    return any(t == w.lower() or t.startswith(w.lower()) for w in REJECT_WORDS)
+
+
+# ============================================================
 # OKF 概念文件解析（Stage 2 用，讀取完整 parent document）
 # ============================================================
 def parse_okf_markdown(md_path, bundle_dir):
@@ -281,50 +302,165 @@ def call_gemini_for_answer(context, question):
         return f"❌ Gemini API 請求失敗: {e}"
 
 
-def respond(message, history):
-    # 1. Stage 1：向量搜尋目錄（title/description/tags/type），取回相關檔案
-    # 若啟用 Rerank，先召回較多候選文件（RERANK_RETRIEVE_K），交給 CrossEncoder 重新排序後
-    # 再篩到 TOP_K_DOCS 份；未啟用或模型載入失敗時，維持原本直接取 TOP_K_DOCS 的行為。
-    retrieve_k = RERANK_RETRIEVE_K if (RERANK_ENABLE and reranker is not None) else TOP_K_DOCS
-    hits = search_catalog(message, top_k=retrieve_k)
-    if hits is None:
-        return "⚠️ 向量資料庫尚未建立，請先執行 train_dsi.py"
-    if not hits:
-        return "⚠️ 無法在知識庫中找到相關內容"
-
-    if RERANK_ENABLE and reranker is not None:
-        hits = rerank_catalog(message, hits, TOP_K_DOCS)
-
-    # 2. 取出這些結果對應的檔名
-    parent_filenames = select_parent_documents(hits)
-    if not parent_filenames:
-        return "⚠️ 向量搜尋有結果，但缺少 filename 中繼資料，請確認 train_dsi.py 是否為最新版本"
-
-    print(f"[系統] Stage 1 定位出的 parent document: {parent_filenames}")
-
-    # 3. Stage 2：讀取完整原始 OKF 內容，交給 AI 分析回答
-    ctx, allowed_images = load_parent_documents(BUNDLE_DIR, parent_filenames)
-    if not ctx:
-        return "⚠️ 無法載入 parent document 內容"
-
+def _call_llm(context, question):
     if STAGE2_MODEL == "ollama":
-        ans = call_ollama_for_answer(ctx, message)
+        return call_ollama_for_answer(context, question)
     elif STAGE2_MODEL == "gemini":
-        ans = call_gemini_for_answer(ctx, message)
+        return call_gemini_for_answer(context, question)
     else:
         return f"❌ 未知的 STAGE2_MODEL：{STAGE2_MODEL}"
 
-    ans = images_to_markdown(ans, allowed_images=allowed_images)
-    return ans
+
+def _search_and_load(query, top_k):
+    retrieve_k = RERANK_RETRIEVE_K if (RERANK_ENABLE and reranker is not None) else top_k
+    hits = search_catalog(query, top_k=retrieve_k)
+    if not hits:
+        return None, None, None
+    if RERANK_ENABLE and reranker is not None:
+        hits = rerank_catalog(query, hits, top_k)
+    filenames = select_parent_documents(hits)
+    if not filenames:
+        return None, None, None
+    ctx, images = load_parent_documents(BUNDLE_DIR, filenames)
+    return ctx, images, filenames
+
+
+def respond(message, history, state):
+    if not isinstance(state, dict) or "stage" not in state:
+        state.clear()
+        state.update(stage=S_IDLE)
+
+    stage = state.get("stage", S_IDLE)
+
+    # ── S_IDLE：初始搜尋 ──
+    if stage == S_IDLE:
+        ctx, images, filenames = _search_and_load(message, TOP_K_DOCS)
+        if ctx is None:
+            return "⚠️ 無法在知識庫中找到相關內容（請先執行 train_dsi.py 建立索引）"
+
+        state["stage"] = S_WAIT_CONFIRM
+        state["context"] = ctx
+        state["allowed_images"] = images
+        state["filenames"] = filenames
+
+        output = f"**找到 {len(filenames)} 份相關文件：**\n\n{ctx}"
+        output += "\n\n---\n✅ **這些文件是否正確？**\n"
+        output += "• 如果是，請直接輸入你想問的問題\n"
+        output += "• 如果不是，請輸入「不對」或「重新搜尋」"
+        return output
+
+    # ── S_WAIT_CONFIRM：等待確認搜尋結果 ──
+    if stage == S_WAIT_CONFIRM:
+        if _is_confirm(message):
+            state["stage"] = S_WAIT_QUESTION
+            return "請輸入你想問的問題："
+
+        if _is_reject(message):
+            state["stage"] = S_WAIT_REPHRASE
+            return "請重新描述你的問題："
+
+        ctx = state.get("context", "")
+        if not ctx:
+            state["stage"] = S_IDLE
+            return "⚠️ 文件內容遺失，請重新輸入問題。"
+        ans = _call_llm(ctx, message)
+        ans = images_to_markdown(ans, state.get("allowed_images", {}))
+        state["stage"] = S_IDLE
+        return ans
+
+    # ── S_WAIT_REPHRASE：等待重新描述問題 ──
+    if stage == S_WAIT_REPHRASE:
+        ctx, images, filenames = _search_and_load(message, TOP_K_DOCS * 2)
+        if not filenames:
+            state["stage"] = S_IDLE
+            return "⚠️ 重新搜尋後仍找不到相關內容，請更精確描述後再試。"
+
+        candidates = []
+        for fn in filenames[:3]:
+            md_path = md_index.get(fn)
+            if not md_path:
+                continue
+            cid, meta, body = parse_okf_markdown(md_path, BUNDLE_DIR)
+            candidates.append({
+                "filename": fn, "title": meta.get("title", ""),
+                "description": meta.get("description", ""),
+                "body": body, "metadata": meta, "concept_id": cid,
+                "md_path": md_path,
+            })
+
+        if not candidates:
+            state["stage"] = S_IDLE
+            return "⚠️ 無法讀取候選文件，請重新輸入問題。"
+
+        state["stage"] = S_SELECTING
+        state["candidates"] = candidates
+
+        lines = ["**重新搜尋結果，請選擇最相關的文件：**\n"]
+        for i, c in enumerate(candidates, 1):
+            desc = (c["description"][:120] + "…") if c["description"] and len(c["description"]) > 120 else (c["description"] or "（無描述）")
+            lines.append(f"**{i}.** {c['title']}")
+            lines.append(f"   {desc}")
+        lines.append("\n請輸入編號(1/2/3)選擇，或輸入「都不對」重新搜尋。")
+        return "\n".join(lines)
+
+    # ── S_SELECTING：等待選擇文件編號 ──
+    if stage == S_SELECTING:
+        msg_s = message.strip()
+        if msg_s in {"都不對", "都不是", "重新", "取消", "返回"}:
+            state["stage"] = S_IDLE
+            return "請重新輸入你的問題："
+
+        try:
+            choice = int(msg_s)
+        except ValueError:
+            return "請輸入有效的編號（1/2/3），或輸入「都不對」重新搜尋。"
+
+        candidates = state.get("candidates", [])
+        if choice < 1 or choice > len(candidates):
+            return "請輸入 1~{} 之間的編號。".format(len(candidates))
+
+        sel = candidates[choice - 1]
+        full = format_concept_segment(sel["concept_id"], sel["metadata"], sel["body"], sel["filename"])
+
+        img_re = re.compile(r"!\[.*?\]\(img/([^)]+)\)")
+        imgs = {}
+        for m in img_re.finditer(sel["body"]):
+            img_name = m.group(1)
+            img_full = os.path.normpath(os.path.join(os.path.dirname(sel["md_path"]), "img", img_name))
+            if os.path.isfile(img_full):
+                imgs[img_name] = img_full
+
+        state["stage"] = S_WAIT_QUESTION
+        state["context"] = full
+        state["allowed_images"] = imgs
+        state["filenames"] = [sel["filename"]]
+
+        return f"**已選擇：{sel['title']}**\n\n{full}\n\n---\n請輸入你想問的問題："
+
+    # ── S_WAIT_QUESTION：等待使用者提問 ──
+    if stage == S_WAIT_QUESTION:
+        ctx = state.get("context", "")
+        if not ctx:
+            state["stage"] = S_IDLE
+            return "⚠️ 文件內容遺失，請重新輸入問題。"
+        ans = _call_llm(ctx, message)
+        ans = images_to_markdown(ans, state.get("allowed_images", {}))
+        state["stage"] = S_IDLE
+        return ans
+
+    state["stage"] = S_IDLE
+    return "請輸入問題。"
 
 
 with gr.Blocks(title="OKF IT 支援助手 (Document Summary Index)") as demo:
     gr.Markdown(
         "# OKF IT 支援助手（Document Summary Index）\n"
-        "Stage 1 用向量搜尋比對每份檔案的摘要（title/description/tags），Stage 2 讀取完整原始 OKF 內容交給 AI 分析回答。"
+        "多輪檢索流程：搜尋 → 確認 → 選擇 → 提問"
     )
+    state = gr.State({"stage": S_IDLE})
     gr.ChatInterface(
         fn=respond,
+        additional_inputs=[state],
         textbox=gr.Textbox(placeholder="請輸入你的問題…", scale=7),
         title=None,
         description=None,
