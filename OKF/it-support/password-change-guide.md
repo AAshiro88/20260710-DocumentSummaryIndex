@@ -3,7 +3,7 @@ type: IT Runbook
 title: 密碼變更指南
 description: 說明公司密碼設定原則，以及在電腦端與網頁端變更密碼的操作流程。
 resource: 知識原始/密碼變更指南(Password Change Guide) 5.pdf
-tags: [password, security, it-support]
+tags: [password, security, it-support, 密碼, 密碼變更, 密碼重設, 安全性]
 timestamp: 2026-07-08T00:00:00Z
 ---
 

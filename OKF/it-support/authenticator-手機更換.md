@@ -3,7 +3,7 @@ type: IT Runbook
 title: Authenticator 換手機步驟
 description: 協助用戶獨立完成多因子驗證器（Microsoft Authenticator）轉換手機綁定的操作步驟。
 resource: 知識原始/Authenticator更換手機步驟.pdf
-tags: [authenticator, mfa, it-support]
+tags: [authenticator, mfa, it-support, 驗證器, 手機轉移, 多因子驗證]
 timestamp: 2026-07-08T00:00:00Z
 ---
 
