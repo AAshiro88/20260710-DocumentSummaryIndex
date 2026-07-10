@@ -394,14 +394,29 @@ def _build_files_list(filenames):
     return files
 
 
+def _resolve_body_images(body, allowed_images):
+    def _replacer(m):
+        alt = m.group(1)
+        img_name = m.group(2)
+        img_path = allowed_images.get(img_name)
+        if img_path and os.path.isfile(img_path):
+            mime = mimetypes.guess_type(img_path)[0] or "image/png"
+            with open(img_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("ascii")
+            return f"![{alt}](data:{mime};base64,{b64})"
+        return m.group(0)
+    return re.sub(r"!\[([^\]]*)\]\(img/([^)]+)\)", _replacer, body)
+
+
 def _format_file_screen(state):
     files, idx = state["files"], state["current_file_idx"]
     cur = files[idx]
     lines = [f"**找到 {len(files)} 份相關文件：**\n"]
-    lines.append(cur["body"])
+    lines.append(_resolve_body_images(cur["body"], cur["allowed_images"]))
     lines.append("")
+    lines.append("[0] 搜尋新問題")
     lines.append("[1] 重新輸入問題")
-    lines.append("[2] 詢問語言模型（直接輸入問題）")
+    lines.append("[2] 繼續詢問語言模型（直接輸入問題）")
     lines.append("")
     lines.append("**文件清單：**")
     for i, f in enumerate(files):
@@ -511,6 +526,9 @@ def respond(message, history, state):
     if stage == S_WAIT_QUESTION:
         try:
             choice = int(message.strip())
+            if choice == 0:
+                state["stage"] = S_IDLE
+                return "請輸入新的問題："
             if choice == 1:
                 state["stage"] = S_WAIT_REPHRASE
                 return "請重新描述你的問題："
@@ -533,8 +551,9 @@ def respond(message, history, state):
             return "⚠️ 文件內容遺失，請重新輸入問題。"
         ans = _call_llm(ctx, message)
         ans = images_to_markdown(ans, state.get("allowed_images", {}))
-        state["stage"] = S_IDLE
-        return ans
+        state["stage"] = S_WAIT_QUESTION
+        menu = "\n\n---\n[0] 搜尋新問題  [1] 重新輸入問題  [2] 繼續詢問語言模型（直接輸入問題）"
+        return ans + menu
 
     state["stage"] = S_IDLE
     return "請輸入問題。"
