@@ -4,7 +4,7 @@ import requests
 from vector_store import QdrantStore
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-BUNDLE_DIR = os.path.join(BASE_DIR, "OKF", "it-support")   # 知識包路徑（Parent Document 的來源）
+BUNDLE_DIR = os.path.join(BASE_DIR, "OKF")   # 知識包路徑（Parent Document 的來源）
 QDRANT_PATH = os.path.join(BASE_DIR, "db", "qdrant")  # Qdrant 持久化儲存路徑
 COLLECTION_NAME = "it_support_dsi"  # Qdrant collection 名稱
 OLLAMA_BASE_URL = "http://localhost:11434"  # Ollama 服務位址

@@ -34,7 +34,7 @@ RERANK_RETRIEVE_K = 15  # 第一階段召回的候選文件數量（Rerank 前�
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-BUNDLE_DIR = os.path.join(BASE_DIR, "OKF", "it-support")
+BUNDLE_DIR = os.path.join(BASE_DIR, "OKF")
 QDRANT_PATH = os.path.join(BASE_DIR, "db", "qdrant")
 COLLECTION_NAME = "it_support_dsi"
 VECTOR_SIZE = 768  # nomic-embed-text 向量維度

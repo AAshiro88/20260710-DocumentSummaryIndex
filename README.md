@@ -20,7 +20,7 @@ dsi_chat.py   →  Gradio 聊天介面
 
 | 檔案 | 用途 |
 |------|------|
-| `train_dsi.py` | 掃描 OKF/it-support 下的 Markdown 文件，建立向量索引存入 Qdrant |
+| `train_dsi.py` | 掃描 OKF 下的 Markdown 文件，建立向量索引存入 Qdrant |
 | `vector_store.py` | Qdrant 客戶端封裝（建立 collection、插入向量、查詢） |
 | `dsi_chat.py` | Gradio ChatInterface 主程式，含狀態機、意圖分類、LLM 串接 |
 | `requirements.txt` | Python 相依套件 |
