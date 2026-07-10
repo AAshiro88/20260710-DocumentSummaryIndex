@@ -7,6 +7,7 @@ import requests
 import gradio as gr
 from dotenv import load_dotenv
 from vector_store import QdrantStore
+import numpy as np
 
 OLLAMA_BASE_URL = "http://localhost:11434"  # Ollama 服務位址
 EMBED_MODEL = "nomic-embed-text"  # Stage 1 向量檢索用的 Embedding 模型
@@ -66,21 +67,61 @@ if RERANK_ENABLE:
 # State Machine - 對話狀態常數
 # ============================================================
 S_IDLE = "idle"
-S_WAIT_CONFIRM = "wait_confirm"
+S_WAIT_FEEDBACK = "wait_feedback"
 S_WAIT_REPHRASE = "wait_rephrase"
 S_SELECTING = "selecting"
 S_WAIT_QUESTION = "wait_question"
 
-CONFIRM_WORDS = {"是", "對", "yes", "對的", "是的", "正確", "沒錯", "要", "好"}
-REJECT_WORDS = {"不對", "不是", "否", "no", "錯誤", "不正確", "不是這個", "重新", "換"}
 
-def _is_confirm(text):
-    t = text.strip().lower()
-    return t in {w.lower() for w in CONFIRM_WORDS}
+# ============================================================
+# 語意判斷（用 embedding 判定 confirm / reject / other）
+# ============================================================
+CONFIRM_EXAMPLES = [
+    "是", "對", "yes", "是的", "沒錯", "正確", "就是這個",
+    "這就是我要的", "好", "ok",
+]
+REJECT_EXAMPLES = [
+    "不對", "不是", "no", "錯誤", "不是這個", "換一個",
+    "不要這個", "我要找別的", "重新", "不是這份",
+]
+SIMILARITY_THRESHOLD = 0.55
 
-def _is_reject(text):
+_confirm_centroid = None
+_reject_centroid = None
+
+def _init_intent_vectors():
+    global _confirm_centroid, _reject_centroid
+    if _confirm_centroid is not None:
+        return
+    try:
+        all_texts = CONFIRM_EXAMPLES + REJECT_EXAMPLES
+        embs = embed_texts(all_texts)
+        n = len(CONFIRM_EXAMPLES)
+        _confirm_centroid = np.mean(embs[:n], axis=0)
+        _reject_centroid = np.mean(embs[n:], axis=0)
+    except Exception:
+        _confirm_centroid = "fallback"
+
+def _classify_intent(text):
+    _init_intent_vectors()
+    if _confirm_centroid == "fallback":
+        return _fallback_classify(text)
+    emb = embed_text(text)
+    confirm_sim = float(np.dot(emb, _confirm_centroid) / (np.linalg.norm(emb) * np.linalg.norm(_confirm_centroid)))
+    reject_sim = float(np.dot(emb, _reject_centroid) / (np.linalg.norm(emb) * np.linalg.norm(_reject_centroid)))
+    if confirm_sim > SIMILARITY_THRESHOLD and confirm_sim > reject_sim:
+        return "confirm"
+    if reject_sim > SIMILARITY_THRESHOLD and reject_sim > confirm_sim:
+        return "reject"
+    return "other"
+
+def _fallback_classify(text):
     t = text.strip().lower()
-    return any(t == w.lower() or t.startswith(w.lower()) for w in REJECT_WORDS)
+    if any(t == w or t.startswith(w) for w in {"是", "對", "yes", "y", "好", "ok", "沒錯"}):
+        return "confirm"
+    if any(t == w or t.startswith(w) for w in {"不對", "不是", "否", "no", "n", "錯誤", "重新", "換"}):
+        return "reject"
+    return "other"
 
 
 # ============================================================
@@ -179,10 +220,13 @@ def images_to_markdown(text, allowed_images=None):
 # Stage 1：向量搜尋「目錄」（title/description/tags/type），
 # 每一筆結果本身就對應一份完整檔案，不需要 chunk 去重複
 # ============================================================
-def embed_text(text):
-    resp = requests.post(f"{OLLAMA_BASE_URL}/api/embed", json={"model": EMBED_MODEL, "input": [text]})
+def embed_texts(texts):
+    resp = requests.post(f"{OLLAMA_BASE_URL}/api/embed", json={"model": EMBED_MODEL, "input": texts})
     resp.raise_for_status()
-    return resp.json()["embeddings"][0]
+    return resp.json()["embeddings"]
+
+def embed_text(text):
+    return embed_texts([text])[0]
 
 
 def search_catalog(query, top_k=TOP_K_DOCS):
@@ -325,6 +369,49 @@ def _search_and_load(query, top_k):
     return ctx, images, filenames
 
 
+def _build_files_list(filenames):
+    files = []
+    img_re = re.compile(r"!\[.*?\]\(img/([^)]+)\)")
+    for fn in filenames:
+        md_path = md_index.get(fn)
+        if not md_path:
+            continue
+        cid, meta, body = parse_okf_markdown(md_path, BUNDLE_DIR)
+        imgs = {}
+        for m in img_re.finditer(body):
+            img_name = m.group(1)
+            img_full = os.path.normpath(os.path.join(os.path.dirname(md_path), "img", img_name))
+            if os.path.isfile(img_full):
+                imgs[img_name] = img_full
+        files.append({
+            "filename": fn,
+            "title": meta.get("title", ""),
+            "description": meta.get("description", ""),
+            "full_content": format_concept_segment(cid, meta, body, fn),
+            "allowed_images": imgs,
+        })
+    return files
+
+
+def _format_current_preview(state):
+    files, idx = state["files"], state["current_file_idx"]
+    cur = files[idx]
+    lines = [f"**找到 {len(files)} 份相關文件：**\n"]
+    lines.append(f"--- 目前預覽：文件 {idx + 1} ---")
+    lines.append(cur["description"] or "（無描述）")
+    lines.append("")
+    lines.append("**所有文件：**")
+    for i, f in enumerate(files):
+        prefix = "← 目前" if i == idx else f"  {i}."
+        lines.append(f"{prefix} {f['title']}")
+    lines.append("")
+    lines.append("✅ **這是你要找的嗎？**")
+    lines.append("• 輸入「是」→ 用此文件提問")
+    lines.append("• 輸入編號 → 預覽該文件")
+    lines.append("• 輸入「不是」→ 重新搜尋")
+    return "\n".join(lines)
+
+
 def respond(message, history, state):
     if not isinstance(state, dict) or "stage" not in state:
         state.clear()
@@ -334,37 +421,47 @@ def respond(message, history, state):
 
     # ── S_IDLE：初始搜尋 ──
     if stage == S_IDLE:
-        ctx, images, filenames = _search_and_load(message, TOP_K_DOCS)
-        if ctx is None:
+        _, _, filenames = _search_and_load(message, TOP_K_DOCS)
+        if not filenames:
             return "⚠️ 無法在知識庫中找到相關內容（請先執行 train_dsi.py 建立索引）"
 
-        state["stage"] = S_WAIT_CONFIRM
-        state["context"] = ctx
-        state["allowed_images"] = images
-        state["filenames"] = filenames
+        files = _build_files_list(filenames)
+        if not files:
+            return "⚠️ 無法讀取檔案內容"
 
-        output = f"**找到 {len(filenames)} 份相關文件：**\n\n{ctx}"
-        output += "\n\n---\n✅ **這些文件是否正確？**\n"
-        output += "• 如果是，請直接輸入你想問的問題\n"
-        output += "• 如果不是，請輸入「不對」或「重新搜尋」"
-        return output
+        state["files"] = files
+        state["current_file_idx"] = 0
+        state["stage"] = S_WAIT_FEEDBACK
 
-    # ── S_WAIT_CONFIRM：等待確認搜尋結果 ──
-    if stage == S_WAIT_CONFIRM:
-        if _is_confirm(message):
+        return _format_current_preview(state)
+
+    # ── S_WAIT_FEEDBACK：等待使用者確認搜尋結果 ──
+    if stage == S_WAIT_FEEDBACK:
+        try:
+            choice = int(message.strip())
+            if 0 <= choice < len(state["files"]):
+                state["current_file_idx"] = choice
+                return _format_current_preview(state)
+        except ValueError:
+            pass
+
+        intent = _classify_intent(message)
+
+        if intent == "confirm":
+            cur = state["files"][state["current_file_idx"]]
+            state["context"] = cur["full_content"]
+            state["allowed_images"] = cur["allowed_images"]
+            state["filenames"] = [cur["filename"]]
             state["stage"] = S_WAIT_QUESTION
             return "請輸入你想問的問題："
 
-        if _is_reject(message):
+        if intent == "reject":
             state["stage"] = S_WAIT_REPHRASE
             return "請重新描述你的問題："
 
-        ctx = state.get("context", "")
-        if not ctx:
-            state["stage"] = S_IDLE
-            return "⚠️ 文件內容遺失，請重新輸入問題。"
-        ans = _call_llm(ctx, message)
-        ans = images_to_markdown(ans, state.get("allowed_images", {}))
+        cur = state["files"][state["current_file_idx"]]
+        ans = _call_llm(cur["full_content"], message)
+        ans = images_to_markdown(ans, cur["allowed_images"])
         state["stage"] = S_IDLE
         return ans
 
