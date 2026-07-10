@@ -412,6 +412,10 @@ def _format_file_screen(state):
     files, idx = state["files"], state["current_file_idx"]
     cur = files[idx]
     lines = [f"**找到 {len(files)} 份相關文件：**\n"]
+    lines.append(f"**{cur['title']}**")
+    if cur.get("description"):
+        lines.append(f"{cur['description']}")
+    lines.append("")
     lines.append(_resolve_body_images(cur["body"], cur["allowed_images"]))
     lines.append("")
     lines.append("[0] 搜尋新問題")
