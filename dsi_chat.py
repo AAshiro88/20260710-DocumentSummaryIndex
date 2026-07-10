@@ -387,28 +387,28 @@ def _build_files_list(filenames):
             "filename": fn,
             "title": meta.get("title", ""),
             "description": meta.get("description", ""),
+            "body": body,
             "full_content": format_concept_segment(cid, meta, body, fn),
             "allowed_images": imgs,
         })
     return files
 
 
-def _format_current_preview(state):
+def _format_file_screen(state):
     files, idx = state["files"], state["current_file_idx"]
     cur = files[idx]
     lines = [f"**找到 {len(files)} 份相關文件：**\n"]
-    lines.append(f"--- 目前預覽：文件 {idx + 1} ---")
-    lines.append(cur["description"] or "（無描述）")
+    lines.append(cur["body"])
     lines.append("")
-    lines.append("**所有文件：**")
+    lines.append("[1] 重新輸入問題")
+    lines.append("[2] 詢問語言模型（直接輸入問題）")
+    lines.append("")
+    lines.append("**文件清單：**")
     for i, f in enumerate(files):
-        prefix = "← 目前" if i == idx else f"  {i}."
-        lines.append(f"{prefix} {f['title']}")
+        marker = " ← 目前預覽" if i == idx else ""
+        lines.append(f"  [{i + 3}] {f['title']}{marker}")
     lines.append("")
-    lines.append("✅ **這是你要找的嗎？**")
-    lines.append("• 輸入「是」→ 用此文件提問")
-    lines.append("• 輸入編號 → 預覽該文件")
-    lines.append("• 輸入「不是」→ 重新搜尋")
+    lines.append("請輸入：")
     return "\n".join(lines)
 
 
@@ -419,7 +419,7 @@ def respond(message, history, state):
 
     stage = state.get("stage", S_IDLE)
 
-    # ── S_IDLE：初始搜尋 ──
+    # ── S_IDLE：初始搜尋，直接顯示第一份文件完整內容 ──
     if stage == S_IDLE:
         _, _, filenames = _search_and_load(message, TOP_K_DOCS)
         if not filenames:
@@ -431,39 +431,12 @@ def respond(message, history, state):
 
         state["files"] = files
         state["current_file_idx"] = 0
-        state["stage"] = S_WAIT_FEEDBACK
+        state["context"] = files[0]["full_content"]
+        state["allowed_images"] = files[0]["allowed_images"]
+        state["filenames"] = [files[0]["filename"]]
+        state["stage"] = S_WAIT_QUESTION
 
-        return _format_current_preview(state)
-
-    # ── S_WAIT_FEEDBACK：等待使用者確認搜尋結果 ──
-    if stage == S_WAIT_FEEDBACK:
-        try:
-            choice = int(message.strip())
-            if 0 <= choice < len(state["files"]):
-                state["current_file_idx"] = choice
-                return _format_current_preview(state)
-        except ValueError:
-            pass
-
-        intent = _classify_intent(message)
-
-        if intent == "confirm":
-            cur = state["files"][state["current_file_idx"]]
-            state["context"] = cur["full_content"]
-            state["allowed_images"] = cur["allowed_images"]
-            state["filenames"] = [cur["filename"]]
-            state["stage"] = S_WAIT_QUESTION
-            return "請輸入你想問的問題："
-
-        if intent == "reject":
-            state["stage"] = S_WAIT_REPHRASE
-            return "請重新描述你的問題："
-
-        cur = state["files"][state["current_file_idx"]]
-        ans = _call_llm(cur["full_content"], message)
-        ans = images_to_markdown(ans, cur["allowed_images"])
-        state["stage"] = S_IDLE
-        return ans
+        return _format_file_screen(state)
 
     # ── S_WAIT_REPHRASE：等待重新描述問題 ──
     if stage == S_WAIT_REPHRASE:
@@ -534,8 +507,26 @@ def respond(message, history, state):
 
         return f"**已選擇：{sel['title']}**\n\n{full}\n\n---\n請輸入你想問的問題："
 
-    # ── S_WAIT_QUESTION：等待使用者提問 ──
+    # ── S_WAIT_QUESTION：等待使用者提問，可切換文件 ──
     if stage == S_WAIT_QUESTION:
+        try:
+            choice = int(message.strip())
+            if choice == 1:
+                state["stage"] = S_WAIT_REPHRASE
+                return "請重新描述你的問題："
+            if choice == 2:
+                return "請直接輸入你的問題："
+            file_idx = choice - 3
+            if 0 <= file_idx < len(state["files"]):
+                state["current_file_idx"] = file_idx
+                sel = state["files"][file_idx]
+                state["context"] = sel["full_content"]
+                state["allowed_images"] = sel["allowed_images"]
+                state["filenames"] = [sel["filename"]]
+                return _format_file_screen(state)
+        except ValueError:
+            pass
+
         ctx = state.get("context", "")
         if not ctx:
             state["stage"] = S_IDLE
@@ -552,7 +543,7 @@ def respond(message, history, state):
 with gr.Blocks(title="OKF IT 支援助手 (Document Summary Index)") as demo:
     gr.Markdown(
         "# OKF IT 支援助手（Document Summary Index）\n"
-        "多輪檢索流程：搜尋 → 確認 → 選擇 → 提問"
+        "多輪檢索流程：搜尋 → 顯示文件 → 直接提問或切換"
     )
     state = gr.State({"stage": S_IDLE})
     gr.ChatInterface(
