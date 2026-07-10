@@ -418,9 +418,9 @@ def _format_file_screen(state):
     lines.append("")
     lines.append(_resolve_body_images(cur["body"], cur["allowed_images"]))
     lines.append("")
-    lines.append("[0] 搜尋新問題")
-    lines.append("[1] 重新輸入問題")
-    lines.append("[2] 繼續詢問語言模型（直接輸入問題）")
+    lines.append("[0] 搜尋新主題")
+    lines.append("[1] 換句話說重新找（顯示多筆候選）")
+    lines.append("[2] 直接詢問 AI")
     lines.append("")
     lines.append("**文件清單：**")
     for i, f in enumerate(files):
@@ -556,7 +556,7 @@ def respond(message, history, state):
         ans = _call_llm(ctx, message)
         ans = images_to_markdown(ans, state.get("allowed_images", {}))
         state["stage"] = S_WAIT_QUESTION
-        menu = "\n\n---\n[0] 搜尋新問題  [1] 重新輸入問題  [2] 繼續詢問語言模型（直接輸入問題）"
+        menu = "\n\n---\n[0] 搜尋新主題  [1] 換句話說重新找（顯示多筆候選）  [2] 直接詢問 AI"
         return ans + menu
 
     state["stage"] = S_IDLE
